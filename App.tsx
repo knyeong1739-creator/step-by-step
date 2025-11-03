@@ -1,7 +1,9 @@
-
+// (App.tsx 파일 맨 위에 추가)
+import { db } from './firebase'; // 1. 우리가 만든 '열쇠'
+import { doc, onSnapshot, setDoc } from "firebase/firestore"; // 2. Firestore 도구
+import { v4 as uuidv4 } from 'uuid'; // 3. 고유 ID 생성 도구 (설치 필요!)
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Player, Mission, Club, UserRole } from './types';
-import { storageService } from './services/storageService';
 import { ADMIN_USERNAME, ADMIN_PASSWORD, TOTAL_STEPS } from './constants';
 
 // --- Helper Components ---
@@ -107,27 +109,99 @@ export default function App() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [clubs, setClubs] = useState<Club[]>([]);
   
-  const refreshData = useCallback(() => {
-      setPlayers(storageService.getPlayers());
-      setMissions(storageService.getMissions());
-      setClubs(storageService.getClubs());
-  }, []);
+ // ************************************************
+// ✅ 4단계: '실시간 감시 카메라' 설치 (수정 완료 버전)
+// (방금 지운 8줄 자리에 이걸 붙여넣으세요)
+// ************************************************
 
-  useEffect(() => {
-    refreshData();
-    setIsLoading(false);
-  }, [refreshData]);
+useEffect(() => {
+  // 'gameData' 컬렉션의 'main' 문서를 '중앙 칠판'으로 사용합니다.
+  const gameDataRef = doc(db, "gameData", "main");
 
-  const handleLogin = (user: Player | 'ADMIN') => {
-    if (user === 'ADMIN') {
-      setIsAdmin(true);
-      setView('admin');
+  // onSnapshot = 실시간 감시 카메라
+  // '중앙 칠판'이 바뀌면 0.1초 만에 알아채고 {} 안의 코드를 실행합니다.
+  const unsubscribe = onSnapshot(gameDataRef, (docSnap) => {
+    if (docSnap.exists()) {
+      // '칠판'에 데이터가 있으면
+      const data = docSnap.data();
+      setPlayers(data.players || []);
+      setMissions(data.missions || []);
+      setClubs(data.clubs || []);
     } else {
-      setCurrentUser(user);
-      setIsAdmin(false);
-      setView('game');
+      // '칠판'이 비어있으면 (앱 최초 실행)
+      console.log("No data found! Initializing...");
+      setPlayers([]);
+      setMissions([]);
+      setClubs([]);
     }
-    refreshData();
+    
+    // ✅ 님이 쓰시던 '로딩 끝' 신호를 여기에 추가!
+    setIsLoading(false); 
+
+  });
+
+  // 앱이 꺼지면 감시 카메라도 끔
+  return () => unsubscribe();
+}, []); // [] = "이 코드는 앱이 켜질 때 딱 한 번만 실행하세요"
+
+const saveDataToFirebase = async (
+  updatedPlayers: Player[], 
+  updatedMissions: Mission[], 
+  updatedClubs: Club[]
+) => {
+  // 'gameData' 컬렉션의 'main' 문서를 '중앙 칠판'으로 사용합니다.
+  const gameDataRef = doc(db, "gameData", "main");
+  
+  try {
+    // 'main' 문서에 3개 배열을 통째로 덮어쓰기
+    await setDoc(gameDataRef, {
+      players: updatedPlayers,
+      missions: updatedMissions,
+      clubs: updatedClubs,
+    });
+  } catch (e) {
+    console.error("Firebase에 저장하는 중 오류 발생: ", e);
+  }
+};
+
+const handleLogin = (name: string, password?: string) => {
+    // 1. 관리자 로그인 처리
+    if (name === ADMIN_USERNAME) {
+        if (password === ADMIN_PASSWORD) {
+            setIsAdmin(true);
+            setView('admin');
+            return;
+        } else {
+            // LoginScreen에서 showPassword가 true일 때만 비밀번호를 묻습니다.
+            // 비밀번호 필드가 보였다는 것은 관리자 이름으로 시도했다는 뜻입니다.
+            if (password !== undefined) { 
+                alert('관리자 비밀번호가 틀렸습니다.');
+            }
+            return;
+        }
+    }
+
+    // 2. 플레이어 로그인 처리
+    // '중앙 칠판'에서 가져온 'players' 배열에서 사용자를 찾습니다.
+    const user = players.find(p => p.name === name);
+
+    if (user) {
+        // 3. 'lastLogin' 시간을 업데이트하고 Firebase에 저장
+        const updatedUser = { ...user, lastLogin: new Date().toISOString() };
+        const updatedPlayers = players.map(p =>
+            p.id === user.id ? updatedUser : p
+        );
+        
+        // '중앙 칠판'에 저장합니다!
+        saveDataToFirebase(updatedPlayers, missions, clubs);
+
+        // 4. 앱 상태(State) 설정
+        setCurrentUser(updatedUser);
+        setIsAdmin(false);
+        setView('game');
+    } else {
+        alert('존재하지 않는 이름입니다. 관리자에게 문의하세요.');
+    }
   };
 
   const handleLogout = () => {
@@ -140,16 +214,25 @@ export default function App() {
     if (!currentUser) return;
     
     const newStep = Math.min(TOTAL_STEPS, currentUser.currentStep + mission.steps);
-    const updatedUser = {
-        ...currentUser,
-        currentStep: newStep,
-        missionHistory: [...currentUser.missionHistory, { missionId: mission.id, completedAt: new Date().toISOString()}]
-    };
+    const updatedUser = {
+        ...currentUser,
+        currentStep: newStep,
+        missionHistory: [...currentUser.missionHistory, { missionId: mission.id, completedAt: new Date().toISOString()}]
+    };
+    
+    // 1. '중앙 칠판'용으로 'updatedPlayers' 배열을 만듭니다.
+    const updatedPlayers = players.map(p => 
+        p.id === updatedUser.id ? updatedUser : p
+    );
     
-    const savedUser = storageService.updatePlayer(updatedUser);
-    setCurrentUser(savedUser);
-    refreshData();
-  };
+    // 2. '중앙 칠판'에 저장합니다!
+    saveDataToFirebase(updatedPlayers, missions, clubs);
+    
+    // 3. 현재 사용자 상태(State)를 바로 업데이트합니다.
+    // (onSnapshot도 이S 일을 하지만, 이게 더 즉각적으로 반응합니다)
+    setCurrentUser(updatedUser);
+    // refreshData()는 삭제되었습니다!
+  };
 
 
   const renderContent = () => {
@@ -158,15 +241,17 @@ export default function App() {
     }
 
     switch (view) {
-      case 'game':
-        return currentUser && <GameScreen user={currentUser} onLogout={handleLogout} onCompleteMission={handleCompleteMission} allPlayers={players} allClubs={clubs} />;
-      case 'admin':
-        return <AdminScreen onLogout={handleLogout} players={players} missions={missions} clubs={clubs} refreshData={refreshData}/>;
-      case 'login':
-      default:
-        return <LoginScreen onLogin={handleLogin} />;
-    }
-  };
+      case 'game':
+        // ✅ 'missions'를 GameScreen에 넘겨줍니다.
+        return currentUser && <GameScreen user={currentUser} onLogout={handleLogout} onCompleteMission={handleCompleteMission} allPlayers={players} allClubs={clubs} missions={missions} />;
+      case 'admin':
+        // ✅ 'refreshData' 프로퍼티를 삭제합니다.
+        return <AdminScreen onLogout={handleLogout} players={players} missions={missions} clubs={clubs} saveDataToFirebase={saveDataToFirebase} />;
+      case 'login':
+      default:
+        // ✅ 'onLogin'은 handleLogin 함수와 완벽하게 호환됩니다. (작업 2에서 수정함)
+        return <LoginScreen onLogin={handleLogin} />;
+    }
 
   return (
     <div className="h-screen w-screen bg-gradient-to-b from-sky-400 to-sky-200 font-sans text-gray-800 overflow-hidden">
@@ -179,7 +264,7 @@ export default function App() {
 
 // --- Screen Components ---
 
-const LoginScreen: React.FC<{ onLogin: (user: Player | 'ADMIN') => void }> = ({ onLogin }) => {
+const LoginScreen: React.FC<{ onLogin: (name: string, password?: string) => void }> = ({ onLogin }) => {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -195,28 +280,13 @@ const LoginScreen: React.FC<{ onLogin: (user: Player | 'ADMIN') => void }> = ({ 
   }, [name]);
 
   const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    try {
-      if (showPassword) {
-          if(password === ADMIN_PASSWORD) {
-              onLogin('ADMIN');
-          } else {
-              setError('비밀번호가 틀렸습니다.');
-          }
-          return;
-      }
+    e.preventDefault();
+    setError('');
 
-      const user = storageService.login(name);
-      if (user) {
-        onLogin(user);
-      } else {
-        setError('존재하지 않는 이름입니다. 관리자에게 문의하세요.');
-      }
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
+    // 관리자 비밀번호가 틀렸다는 에러는 App 컴포넌트의 'alert'가 처리합니다.
+    // 여기서는 그냥 'onLogin'으로 이름과 비밀번호를 올리기만 합니다.
+    onLogin(name, password);
+  };
 
   return (
     <div className="flex flex-col items-center justify-center h-full p-4 z-20 relative">
@@ -260,15 +330,16 @@ const LoginScreen: React.FC<{ onLogin: (user: Player | 'ADMIN') => void }> = ({ 
 
 
 const GameScreen: React.FC<{
-  user: Player;
-  onLogout: () => void;
-  onCompleteMission: (mission: Mission) => void;
-  allPlayers: Player[];
-  allClubs: Club[];
-}> = ({ user, onLogout, onCompleteMission, allPlayers, allClubs }) => {
-    const [activeTab, setActiveTab] = useState('missions');
-    const [showCongratsModal, setShowCongratsModal] = useState(false);
-    const missions = storageService.getMissions();
+  user: Player;
+  onLogout: () => void;
+  onCompleteMission: (mission: Mission) => void;
+  allPlayers: Player[];
+  allClubs: Club[];
+  missions: Mission[]; // 1. 'missions'를 받도록 추가
+}> = ({ user, onLogout, onCompleteMission, allPlayers, allClubs, missions }) => { // ✅ 2. 'missions'를 받도록 추가
+    const [activeTab, setActiveTab] = useState('missions');
+    const [showCongratsModal, setShowCongratsModal] = useState(false);
+    // 3. 'storageService.getMissions()' 줄 삭제됨!
     
     const sortedPlayers = useMemo(() => [...allPlayers].sort((a, b) => b.currentStep - a.currentStep), [allPlayers]);
     
@@ -404,34 +475,52 @@ const GameScreen: React.FC<{
 };
 
 const AdminScreen: React.FC<{ 
-    onLogout: () => void;
-    players: Player[];
-    missions: Mission[];
-    clubs: Club[];
-    refreshData: () => void;
-}> = ({ onLogout, players, missions, clubs, refreshData }) => {
-    const [activeTab, setActiveTab] = useState('status');
+    onLogout: () => void;
+    players: Player[];
+    missions: Mission[];
+    clubs: Club[];
+    // ✅ 'refreshData' 대신 'saveDataToFirebase'를 받도록 수정
+    saveDataToFirebase: (players: Player[], missions: Mission[], clubs: Club[]) => Promise<void>; 
+}> = ({ onLogout, players, missions, clubs, saveDataToFirebase }) => { // ✅ 받도록 수정
+    const [activeTab, setActiveTab] = useState('status');
 
-    return (
-        <div className="h-full w-full flex flex-col p-4 bg-gray-50">
-            <header className="flex justify-between items-center pb-4 border-b">
-                <h1 className="text-2xl font-bold">관리자 페이지</h1>
-                <button onClick={onLogout} className="bg-gray-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-gray-700 transition">로그아웃</button>
-            </header>
-            <nav className="flex border-b my-4 overflow-x-auto">
-                <button onClick={() => setActiveTab('status')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'status' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>현황</button>
-                <button onClick={() => setActiveTab('players')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'players' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>플레이어 관리</button>
-                <button onClick={() => setActiveTab('missions')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'missions' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>미션 관리</button>
-                <button onClick={() => setActiveTab('clubs')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'clubs' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>동아리 관리</button>
-            </nav>
-            <div className="flex-grow overflow-y-auto">
-                {activeTab === 'status' && <StatusTab players={players} />}
-                {activeTab === 'players' && <PlayerManagementTab players={players} clubs={clubs} refreshData={refreshData} />}
-                {activeTab === 'missions' && <MissionManagementTab missions={missions} refreshData={refreshData} />}
-                {activeTab === 'clubs' && <ClubManagementTab clubs={clubs} refreshData={refreshData} />}
-            </div>
-        </div>
-    );
+    return (
+        <div className="h-full w-full flex flex-col p-4 bg-gray-50">
+            <header className="flex justify-between items-center pb-4 border-b">
+                <h1 className="text-2xl font-bold">관리자 페이지</h1>
+                <button onClick={onLogout} className="bg-gray-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-gray-700 transition">로그아웃</button>
+            </header>
+            <nav className="flex border-b my-4 overflow-x-auto">
+                <button onClick={() => setActiveTab('status')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'status' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>현황</button>
+                <button onClick={() => setActiveTab('players')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'players' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>플레이어 관리</button>
+                <button onClick={() => setActiveTab('missions')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'missions' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>미션 관리</button>
+                <button onClick={() => setActiveTab('clubs')} className={`flex-1 py-2 font-bold whitespace-nowrap px-2 ${activeTab === 'clubs' ? 'text-sky-600 border-b-2 border-sky-600' : 'text-gray-500'}`}>동아리 관리</button>
+            </nav>
+            <div className="flex-grow overflow-y-auto">
+                {activeTab === 'status' && <StatusTab players={players} />}
+                
+                {/* ✅ 'saveDataToFirebase'와 모든 데이터를 자식들에게 전달! */}
+                {activeTab === 'players' && <PlayerManagementTab 
+                    players={players} 
+                    missions={missions} 
+                    clubs={clubs} 
+                    saveDataToFirebase={saveDataToFirebase} 
+                />}
+                {activeTab === 'missions' && <MissionManagementTab 
+                    players={players} 
+                    missions={missions} 
+                    clubs={clubs} 
+                    saveDataToFirebase={saveDataToFirebase} 
+                />}
+                {activeTab === 'clubs' && <ClubManagementTab 
+                    players={players} 
+                    missions={missions} 
+                    clubs={clubs} 
+                    saveDataToFirebase={saveDataToFirebase} 
+                />}
+            </div>
+        </div>
+    );
 };
 
 // --- Admin Tab Components ---
@@ -462,226 +551,305 @@ const StatusTab: React.FC<{players: Player[]}> = ({ players }) => (
     </div>
 );
 
-const PlayerManagementTab: React.FC<{players: Player[], clubs: Club[], refreshData: () => void}> = ({ players, clubs, refreshData }) => {
-    const [newName, setNewName] = useState('');
-    const [newPlayerClubId, setNewPlayerClubId] = useState('none');
-    const [newPlayerRole, setNewPlayerRole] = useState<UserRole>(UserRole.PLAYER);
-    const [error, setError] = useState('');
+// ✅ 작업 8: PlayerManagementTab (완성본)
+// ✅ 작업 8: PlayerManagementTab (완성본)
+const PlayerManagementTab: React.FC<{
+    players: Player[], 
+    clubs: Club[], 
+    missions: Mission[], // ✅ missions 추가 (saveDataToFirebase는 3종 세트가 다 필요함)
+    saveDataToFirebase: (players: Player[], missions: Mission[], clubs: Club[]) => Promise<void>; // ✅ refreshData 대신
+}> = ({ players, clubs, missions, saveDataToFirebase }) => {
+    const [newName, setNewName] = useState('');
+    const [newPlayerClubId, setNewPlayerClubId] = useState('none');
+    const [newPlayerRole, setNewPlayerRole] = useState<UserRole>(UserRole.PLAYER);
+    const [error, setError] = useState('');
 
-    const handleAddPlayer = (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
-        if (!newName.trim()) {
-            setError('이름을 입력해주세요.');
-            return;
-        }
-        try {
-            const addedPlayer = storageService.addPlayer(newName, newPlayerClubId, newPlayerRole);
-            
-            if (newPlayerRole === UserRole.CLUB_PRESIDENT && newPlayerClubId !== 'none') {
-                const club = clubs.find(c => c.id === newPlayerClubId);
-                if (club) {
-                    storageService.updateClub({ ...club, presidentId: addedPlayer.id });
-                }
-            }
+    const handleAddPlayer = (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        if (!newName.trim()) {
+            setError('이름을 입력해주세요.');
+            return;
+        }
+        if (players.find(p => p.name === newName.trim())) {
+            setError('이미 존재하는 이름입니다.');
+            return;
+        }
 
-            setNewName('');
-            setNewPlayerClubId('none');
-            setNewPlayerRole(UserRole.PLAYER);
-            refreshData();
-        } catch (err: any) {
-            setError(err.message);
-        }
-    };
-
-    const handleDeletePlayer = (id: string) => {
-        if (window.confirm('정말 이 플레이어를 삭제하시겠습니까?')) {
-            storageService.deletePlayer(id);
-            refreshData();
-        }
-    };
-    
-    // Fix for: This comparison appears to be unintentional because the types 'UserRole.PLAYER | UserRole.TEAM_LEADER | UserRole.ADMIN' and 'UserRole.CLUB_PRESIDENT' have no overlap.
-    const handleSetRole = (player: Player, role: UserRole) => {
-        const wasPresident = player.role === UserRole.CLUB_PRESIDENT;
-        const isNowPresident = role === UserRole.CLUB_PRESIDENT;
+        const newPlayer: Player = {
+            id: uuidv4(), 
+            name: newName.trim(),
+            clubId: newPlayerClubId === 'none' ? undefined : newPlayerClubId,
+            role: newPlayerClubId === 'none' ? UserRole.PLAYER : newPlayerRole,
+            currentStep: 0,
+            missionHistory: [],
+            lastLogin: new Date(0).toISOString(), 
+        };
         
-        const updatedPlayer = {...player, role};
-        storageService.updatePlayer(updatedPlayer);
+        const updatedPlayers = [...players, newPlayer];
+        let updatedClubs = [...clubs];
 
+        if (newPlayer.role === UserRole.CLUB_PRESIDENT && newPlayer.clubId) {
+            updatedClubs = clubs.map(c => 
+                c.id === newPlayer.clubId ? { ...c, presidentId: newPlayer.id } : c
+            );
+        }
+
+        saveDataToFirebase(updatedPlayers, missions, updatedClubs);
+
+        setNewName('');
+        setNewPlayerClubId('none');
+        setNewPlayerRole(UserRole.PLAYER);
+    };
+
+    const handleDeletePlayer = (id: string) => {
+        if (window.confirm('정말 이 플레이어를 삭제하시겠습니까?')) {
+            const updatedPlayers = players.filter(p => p.id !== id);
+            saveDataToFirebase(updatedPlayers, missions, clubs);
+        }
+    };
+    
+    const handleSetRole = (player: Player, role: UserRole) => {
+        const wasPresident = player.role === UserRole.CLUB_PRESIDENT;
+        const isNowPresident = role === UserRole.CLUB_PRESIDENT;
+        
+        const updatedPlayer = {...player, role};
+        const updatedPlayers = players.map(p => p.id === player.id ? updatedPlayer : p);
+        
+        let updatedClubs = [...clubs];
         if (player.clubId) {
             const club = clubs.find(c => c.id === player.clubId);
             if (club) {
                 if (isNowPresident) {
-                    // If the new role is president, update the club's presidentId.
-                    storageService.updateClub({ ...club, presidentId: player.id });
+                    updatedClubs = clubs.map(c => c.id === player.clubId ? { ...c, presidentId: player.id } : c);
                 } else if (wasPresident) {
-                    // If the old role was president and the new one is not, clear the presidentId.
-                    storageService.updateClub({ ...club, presidentId: '' });
+                    updatedClubs = clubs.map(c => c.id === player.clubId ? { ...c, presidentId: '' } : c);
                 }
             }
         }
-        refreshData();
-    };
+        saveDataToFirebase(updatedPlayers, missions, updatedClubs);
+    };
 
-    const handleSetClub = (player: Player, clubId: string) => {
-        const newClubId = clubId === 'none' ? undefined : clubId;
-        const oldClubId = player.clubId;
-        const updatedPlayer = {...player, clubId: newClubId};
-        
-        if (player.role === UserRole.CLUB_PRESIDENT) {
-            updatedPlayer.role = UserRole.PLAYER;
-            const oldClub = clubs.find(c => c.id === oldClubId);
-            if (oldClub) {
-                storageService.updateClub({ ...oldClub, presidentId: '' });
-            }
-        }
-        storageService.updatePlayer(updatedPlayer);
-        refreshData();
-    };
-    
-    const getRoleDisplayName = (role: UserRole) => {
-        switch(role) {
-            case UserRole.PLAYER: return '회원';
-            case UserRole.TEAM_LEADER: return '팀장';
-            case UserRole.CLUB_PRESIDENT: return '회장';
-            default: return role;
-        }
-    };
-    
-    return (
-        <div className="space-y-4">
-            <h2 className="text-xl font-bold mb-2">플레이어 관리</h2>
-            <form onSubmit={handleAddPlayer} className="bg-white p-4 rounded-lg shadow-sm space-y-3">
-                 <h3 className="font-semibold">새 플레이어 추가</h3>
-                 <input type="text" placeholder="이름" value={newName} onChange={e => setNewName(e.target.value)} className="w-full border p-2 rounded" />
-                 <select value={newPlayerClubId} onChange={(e) => setNewPlayerClubId(e.target.value)} className="w-full border p-2 rounded">
-                    <option value="none">동아리 없음</option>
-                    {clubs.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                 </select>
-                 <select value={newPlayerRole} onChange={(e) => setNewPlayerRole(e.target.value as UserRole)} className="w-full border p-2 rounded" disabled={newPlayerClubId === 'none'}>
-                     <option value={UserRole.PLAYER}>회원</option>
-                     <option value={UserRole.TEAM_LEADER}>팀장</option>
-                     <option value={UserRole.CLUB_PRESIDENT}>회장</option>
-                 </select>
-                 {error && <p className="text-red-500 text-sm">{error}</p>}
-                 <button type="submit" className="w-full bg-sky-500 text-white p-2 rounded hover:bg-sky-600">추가하기</button>
-            </form>
-            
-            <div className="space-y-2">
-                {players.map(p => (
-                    <div key={p.id} className="bg-white p-3 rounded-lg shadow-sm flex flex-col md:flex-row md:items-center justify-between space-y-2 md:space-y-0">
-                        <div>
-                            <span className="font-semibold">{p.name}</span>
-                            <span className="text-sm text-gray-600 ml-2">({getRoleDisplayName(p.role)})</span>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                            <select value={p.clubId || 'none'} onChange={(e) => handleSetClub(p, e.target.value)} className="border rounded p-1 text-sm">
-                                <option value="none">동아리 없음</option>
-                                {clubs.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                            </select>
-                            <select value={p.role} onChange={(e) => handleSetRole(p, e.target.value as UserRole)} className="border rounded p-1 text-sm" disabled={!p.clubId}>
-                                <option value={UserRole.PLAYER}>회원</option>
-                                <option value={UserRole.TEAM_LEADER}>팀장</option>
-                                <option value={UserRole.CLUB_PRESIDENT}>회장</option>
-                            </select>
-                            <button onClick={() => handleDeletePlayer(p.id)} className="text-red-500 hover:text-red-700 px-2 py-1 text-xs font-bold">삭제</button>
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
-    );
+    const handleSetClub = (player: Player, clubId: string) => {
+        const newClubId = clubId === 'none' ? undefined : clubId;
+         const oldClubId = player.clubId;
+        
+        let updatedPlayer = {...player, clubId: newClubId};
+        let updatedClubs = [...clubs];
+        
+        if (player.role === UserRole.CLUB_PRESIDENT) {
+            updatedPlayer.role = UserRole.PLAYER;
+            const oldClub = clubs.find(c => c.id === oldClubId);
+            if (oldClub) {
+                updatedClubs = updatedClubs.map(c => c.id === oldClubId ? { ...c, presidentId: '' } : c);
+            }
+        }
+        
+        const updatedPlayers = players.map(p => p.id === player.id ? updatedPlayer : p);
+        saveDataToFirebase(updatedPlayers, missions, updatedClubs);
+    };
+    
+    const getRoleDisplayName = (role: UserRole) => {
+        switch(role) {
+            case UserRole.PLAYER: return '회원';
+            case UserRole.TEAM_LEADER: return '팀장';
+            case UserRole.CLUB_PRESIDENT: return '회장';
+            default: return role;
+        }
+    };
+    
+    return (
+        <div className="space-y-4">
+            <h2 className="text-xl font-bold mb-2">플레이어 관리</h2>
+            <form onSubmit={handleAddPlayer} className="bg-white p-4 rounded-lg shadow-sm space-y-3">
+                 <h3 className="font-semibold">새 플레이어 추가</h3>
+                 <input type="text" placeholder="이름" value={newName} onChange={e => setNewName(e.target.value)} className="w-full border p-2 rounded" />
+                 <select value={newPlayerClubId} onChange={(e) => setNewPlayerClubId(e.target.value)} className="w-full border p-2 rounded">
+                    <option value="none">동아리 없음</option>
+                    {clubs.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                 </select>
+                 <select value={newPlayerRole} onChange={(e) => setNewPlayerRole(e.target.value as UserRole)} className="w-full border p-2 rounded" disabled={newPlayerClubId === 'none'}>
+                     <option value={UserRole.PLAYER}>회원</option>
+                     <option value={UserRole.TEAM_LEADER}>팀장</option>
+                     <option value={UserRole.CLUB_PRESIDENT}>회장</option>
+                 </select>
+                 {error && <p className="text-red-500 text-sm">{error}</p>}
+Button            <button type="submit" className="w-full bg-sky-500 text-white p-2 rounded hover:bg-sky-600">추가하기</button>
+            </form>
+            
+            <div className="space-y-2">
+                {/* ⬇️ 이 부분이 아까 잘렸던 곳입니다! ⬇️ */}
+                {players.map(p => (
+                    <div key={p.id} className="bg-white p-3 rounded-lg shadow-sm flex flex-col md:flex-row md:items-center justify-between space-y-2 md:space-y-0">
+                        <div>
+                            <span className="font-semibold">{p.name}</span>
+                            <span className="text-sm text-gray-600 ml-2">({getRoleDisplayName(p.role)})</span>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            <select value={p.clubId || 'none'} onChange={(e) => handleSetClub(p, e.target.value)} className="border rounded p-1 text-sm">
+                                <option value="none">동아리 없음</option>
+                                {clubs.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                            <select value={p.role} onChange={(e) => handleSetRole(p, e.target.value as UserRole)} className="border rounded p-1 text-sm" disabled={!p.clubId}>
+                                <option value={UserRole.PLAYER}>회원</option>
+                                <option value={UserRole.TEAM_LEADER}>팀장</option>
+                                <option value={UserRole.CLUB_PRESIDENT}>회장</option>
+                            </select>
+                            <button onClick={() => handleDeletePlayer(p.id)} className="text-red-500 hover:text-red-700 px-2 py-1 text-xs font-bold">삭제</button>
+                  S       </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
 };
 
-const ClubManagementTab: React.FC<{clubs: Club[], refreshData: () => void}> = ({ clubs, refreshData }) => {
-    const [name, setName] = useState('');
-    const [error, setError] = useState('');
+const ClubManagementTab: React.FC<{
+    players: Player[], // ✅ players 추가 (동아리 삭제 시 플레이어 정보 변경)
+    missions: Mission[], // ✅ missions 추가 (saveDataToFirebase를 위해)
+    clubs: Club[], 
+    saveDataToFirebase: (players: Player[], missions: Mission[], clubs: Club[]) => Promise<void>; // ✅ refreshData 대신
+}> = ({ players, missions, clubs, saveDataToFirebase }) => {
+    const [name, setName] = useState('');
+    const [error, setError] = useState('');
 
-    const handleAddClub = (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
-        if (!name.trim()) {
-            setError('동아리 이름을 입력해주세요.');
+    const handleAddClub = (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        if (!name.trim()) {
+            setError('동아리 이름을 입력해주세요.');
+            return;
+        }
+        if (clubs.find(c => c.name === name.trim())) {
+            setError('이미 존재하는 동아리 이름입니다.');
             return;
         }
-        try {
-            storageService.createClub(name);
-            setName('');
-            refreshData();
-        } catch (err: any) {
-            setError(err.message);
-        }
-    };
 
-    const handleDeleteClub = (id: string) => {
-        if (window.confirm('정말 이 동아리를 삭제하시겠습니까? 소속된 모든 회원의 동아리 정보가 삭제됩니다.')) {
-            storageService.deleteClub(id);
-            refreshData();
-        }
-    }
+        // ✅ '중앙 칠판'에 저장할 새 동아리 객체 생성
+        const newClub: Club = {
+            id: uuidv4(),
+            name: name.trim(),
+            presidentId: '', // 회장은 PlayerManagementTab에서 별도 지정
+        };
 
-    return (
-        <div className="space-y-4">
-            <h2 className="text-xl font-bold mb-2">동아리 관리</h2>
-            <form onSubmit={handleAddClub} className="bg-white p-4 rounded-lg shadow-sm space-y-3">
-                <h3 className="font-semibold">새 동아리 추가</h3>
-                <input type="text" placeholder="동아리 이름" value={name} onChange={e => setName(e.target.value)} className="w-full border p-2 rounded" />
-                {error && <p className="text-red-500 text-sm">{error}</p>}
-                <button type="submit" className="w-full bg-sky-500 text-white p-2 rounded hover:bg-sky-600">추가하기</button>
-            </form>
-            <div className="space-y-2">
-                <h3 className="font-semibold">현재 동아리 목록</h3>
-                {clubs.map(c => (
-                    <div key={c.id} className="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center">
-                        <span>{c.name}</span>
-                        <button onClick={() => handleDeleteClub(c.id)} className="text-red-500 hover:text-red-700 font-bold">삭제</button>
-                    </div>
-                ))}
-                 {clubs.length === 0 && <p className="text-center text-gray-500 pt-4">생성된 동아리가 없습니다.</p>}
-            </div>
-        </div>
-    );
+        const updatedClubs = [...clubs, newClub];
+        
+        // ✅ '중앙 칠판'에 저장!
+        saveDataToFirebase(players, missions, updatedClubs);
+        // ✅ refreshData() 삭제!
+        
+        setName('');
+    };
+
+    const handleDeleteClub = (id: string) => {
+        if (window.confirm('정말 이 동아리를 삭제하시겠습니까? 소속된 모든 회원의 동아리 정보가 삭제됩니다.')) {
+            // ✅ 1. 동아리 목록에서 삭제
+            const updatedClubs = clubs.filter(c => c.id !== id);
+            
+            // ✅ 2. 모든 플레이어를 순회하며 해당 동아리 ID를 제거하고, 역할을 '회원'으로 강등
+            const updatedPlayers = players.map(p => {
+                if (p.clubId === id) {
+                    return {
+                        ...p,
+                        clubId: undefined,
+                        role: UserRole.PLAYER
+                    };
+                }
+                return p;
+            });
+            
+            // ✅ '중앙 칠판'에 저장!
+            saveDataToFirebase(updatedPlayers, missions, updatedClubs);
+            // ✅ refreshData() 삭제!
+        }
+    }
+
+    // ✅ (이 아래 JSX 부분은 낡은 코드와 동일합니다)
+    return (
+        <div className="space-y-4">
+            <h2 className="text-xl font-bold mb-2">동아리 관리</h2>
+            <form onSubmit={handleAddClub} className="bg-white p-4 rounded-lg shadow-sm space-y-3">
+                <h3 className="font-semibold">새 동아리 추가</h3>
+                <input type="text" placeholder="동아리 이름" value={name} onChange={e => setName(e.target.value)} className="w-full border p-2 rounded" />
+                {error && <p className="text-red-500 text-sm">{error}</p>}
+                <button type="submit" className="w-full bg-sky-500 text-white p-2 rounded hover:bg-sky-600">추가하기</button>
+            </form>
+            <div className="space-y-2">
+                <h3 className="font-semibold">현재 동아리 목록</h3>
+                {clubs.map(c => (
+                    <div key={c.id} className="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center">
+                        <span>{c.name}</span>
+                        <button onClick={() => handleDeleteClub(c.id)} className="text-red-500 hover:text-red-700 font-bold">삭제</button>
+                    </div>
+                ))}
+                 {clubs.length === 0 && <p className="text-center text-gray-500 pt-4">생성된 동아리가 없습니다.</p>}
+            </div>
+        </div>
+    );
 };
 
-const MissionManagementTab: React.FC<{missions: Mission[], refreshData: () => void}> = ({ missions, refreshData }) => {
-    const [title, setTitle] = useState('');
-    const [steps, setSteps] = useState(1);
+const MissionManagementTab: React.FC<{
+    players: Player[], // ✅ players 추가
+    missions: Mission[], 
+    clubs: Club[], // ✅ clubs 추가
+    saveDataToFirebase: (players: Player[], missions: Mission[], clubs: Club[]) => Promise<void>; // ✅ refreshData 대신
+}> = ({ players, missions, clubs, saveDataToFirebase }) => {
+    const [title, setTitle] = useState('');
+    const [steps, setSteps] = useState(1);
 
-    const handleAddMission = (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!title.trim() || steps < 1) return;
-        storageService.addMission(title, steps);
-        setTitle('');
-        setSteps(1);
-        refreshData();
-    };
+    const handleAddMission = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!title.trim() || steps < 1) return;
 
-    const handleDeleteMission = (id: string) => {
-        if (window.confirm('정말 이 미션을 삭제하시겠습니까?')) {
-            storageService.deleteMission(id);
-            refreshData();
-        }
-    }
+        // ✅ '중앙 칠판'에 저장할 새 미션 객체 생성
+        const newMission: Mission = {
+            id: uuidv4(), // 1단계에서 import한 uuid 사용
+            title: title.trim(),
+            steps: steps
+        };
+        
+        // ✅ '중앙 칠판'에 저장할 새 배열 생성
+        const updatedMissions = [...missions, newMission];
+        
+        // ✅ '중앙 칠판'에 저장!
+        saveDataToFirebase(players, updatedMissions, clubs);
+        
+        // ✅ 입력창 초기화
+        setTitle('');
+        setSteps(1);
+        // ✅ refreshData() 삭제!
+    };
 
-    return (
-        <div className="space-y-4">
-            <h2 className="text-xl font-bold mb-2">미션 관리</h2>
-            <form onSubmit={handleAddMission} className="bg-white p-4 rounded-lg shadow-sm space-y-3">
-                <h3 className="font-semibold">새 미션 추가</h3>
-                <input type="text" placeholder="미션 내용" value={title} onChange={e => setTitle(e.target.value)} className="w-full border p-2 rounded" />
-                <input type="number" placeholder="오르는 칸 수" value={steps} onChange={e => setSteps(Number(e.target.value))} className="w-full border p-2 rounded" min="1" />
-                <button type="submit" className="w-full bg-sky-500 text-white p-2 rounded hover:bg-sky-600">추가하기</button>
-            </form>
-            <div className="space-y-2">
-                <h3 className="font-semibold">현재 미션 목록</h3>
-                {missions.map(m => (
-                    <div key={m.id} className="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center">
-                        <span>{m.title} ({m.steps}칸)</span>
-                        <button onClick={() => handleDeleteMission(m.id)} className="text-red-500 hover:text-red-700 font-bold">삭제</button>
-                    </div>
-                ))}
-            </div>
-        </div>
-    )
-};
+    const handleDeleteMission = (id: string) => {
+        if (window.confirm('정말 이 미션을 삭제하시겠습니까?')) {
+            // ✅ '중앙 칠판'에 저장할 새 배열 생성
+            const updatedMissions = missions.filter(m => m.id !== id);
+            
+            // ✅ '중앙 칠판'에 저장!
+            saveDataToFirebase(players, updatedMissions, clubs);
+            // ✅ refreshData() 삭제!
+        }
+    }
+
+    // ✅ (이 아래 JSX 부분은 낡은 코드와 동일합니다)
+    return (
+        <div className="space-y-4">
+            <h2 className="text-xl font-bold mb-2">미션 관리</h2>
+            <form onSubmit={handleAddMission} className="bg-white p-4 rounded-lg shadow-sm space-y-3">
+                <h3 className="font-semibold">새 미션 추가</h3>
+                <input type="text" placeholder="미션 내용" value={title} onChange={e => setTitle(e.target.value)} className="w-full border p-2 rounded" />
+                <input type="number" placeholder="오르는 칸 수" value={steps} onChange={e => setSteps(Number(e.target.value))} className="w-full border p-2 rounded" min="1" />
+                <button type="submit" className="w-full bg-sky-500 text-white p-2 rounded hover:bg-sky-600">추가하기</button>
+            </form>
+            <div className="space-y-2">
+      S          <h3 className="font-semibold">현재 미션 목록</h3>
+                {missions.map(m => (
+                    <div key={m.id} className="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center">
+                        <span>{m.title} ({m.steps}칸)</span>
+                        <button onClick={() => handleDeleteMission(m.id)} className="text-red-500 hover:text-red-700 font-bold">삭제</button>
+                    </div>
+                ))}
+            </div>
+        </div>
+    )
+};}
